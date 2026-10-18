@@ -128,6 +128,14 @@ static int vivo_disarm_sys_exit(kallsyms_lookup_name_t get_addr,
     }
     path_put_fn(&p);
 
+    /* Guard the layout assumption: the +72 offset is only known for the
+     * vivo android16-6.12 kernel (6.12.23-android16-5). On any other KMI
+     * build the struct tracepoint layout may differ, so skip the guard
+     * instead of writing at a wrong offset. */
+#if LINUX_VERSION_CODE != KERNEL_VERSION(6, 12, 0)
+    pr_info("dfroot: sys_exit guard not verified for this KMI, skipping\n");
+    return 0;
+#else
     tp = (void *)get_addr("__tracepoint_sys_exit");
     if (!tp) {
         pr_err("dfroot: __tracepoint_sys_exit not found\n");
@@ -143,6 +151,7 @@ static int vivo_disarm_sys_exit(kallsyms_lookup_name_t get_addr,
     vaddr = (unsigned long)xchg(funcs, NULL);
     pr_info("dfroot: vivo sys_exit funcs %px cleared\n", (void *)vaddr);
     return 0;
+#endif
 }
 
 static int __nocfi __init dfroot_init(void)
