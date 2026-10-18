@@ -7,6 +7,7 @@
 #include <linux/namei.h>
 #include <linux/ptrace.h>
 #include <linux/slab.h>
+#include <linux/version.h>
 #include <asm/cpufeature.h>
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("DFRoot LKM");
