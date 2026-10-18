@@ -35,6 +35,14 @@ typedef int  (*insn_patch_t)(void *addrs[], u32 insns[], int cnt);
 #define VIVO_SYS_EXIT_FUNCS_IMAGE_OFF  39405704
 #define VIVO_SYS_EXIT_FUNCS_TP_OFF     72
 
+/* Offset is only known for the vivo android16-6.12 KMI. The DDK tree for
+ * that KMI is 6.12.76, so this must match the whole 6.12.x range — an
+ * exact KERNEL_VERSION(6,12,0) test silently excludes the real build and
+ * compiles the guard out entirely (which is what let the vr callback stay
+ * live through the soft reboot and hard-reset the device). */
+#define VIVO_612_KMI  (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0) && \
+                       LINUX_VERSION_CODE <  KERNEL_VERSION(6, 13, 0))
+
 static insn_patch_t insn_patch_text;
 
 /* Reversible function patch: saves the original 3 instructions so the patch
@@ -123,11 +131,10 @@ static int vivo_disarm_sys_exit(kallsyms_lookup_name_t get_addr,
                                 path_put_t path_put_fn)
 {
     struct path p;
-#if LINUX_VERSION_CODE == KERNEL_VERSION(6, 12, 0)
+#if VIVO_612_KMI
     void *tp, *text, **funcs;
     unsigned long vaddr;
 #endif
-
     if (kern_path_fn("/sys/module/vr", 0, &p)) {
         pr_info("dfroot: vr module not loaded, skipping sys_exit guard\n");
         return 0;
@@ -138,7 +145,7 @@ static int vivo_disarm_sys_exit(kallsyms_lookup_name_t get_addr,
      * vivo android16-6.12 kernel (6.12.23-android16-5). On any other KMI
      * build the struct tracepoint layout may differ, so skip the guard
      * instead of writing at a wrong offset. */
-#if LINUX_VERSION_CODE != KERNEL_VERSION(6, 12, 0)
+#if !VIVO_612_KMI
     pr_info("dfroot: sys_exit guard not verified for this KMI, skipping\n");
     return 0;
 #else
