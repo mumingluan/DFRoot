@@ -160,6 +160,11 @@ static int __nocfi __init dfroot_init(void)
     void *avc_fn, *avc_noaudit_fn, *oplus_exe_fn, *oplus_root_fn, *defex_enforce_fn, *defex_umh_fn;
     void *info;
     int ret;
+    /* Patch bookkeeping for the avc pair, which is reverted after the root
+     * handoff so SELinux can be re-armed. */
+    static struct rev_patch avc_rp, avc_noaudit_rp;
+    static struct rev_patch oplus_exe_rp, oplus_root_rp;
+    static struct rev_patch defex_enforce_rp, defex_umh_rp;
 
     // UMH command to run
     static const char sh[] = "/system/bin/sh";
@@ -226,13 +231,6 @@ static int __nocfi __init dfroot_init(void)
     }
     WRITE_ONCE(*selinux_state, false);
     pr_info("dfroot: selinux_state permissive\n");
-
-    /* On kernels where CONFIG_SECURITY_SELINUX_DEVELOP=n the selinux_state
-     * write above is a no-op — patch the SELinux checks themselves instead
-     * (both: most denials surface through the noaudit path first). The avc
-     * pair is patched REVERSIBLY and restored once the root handoff is done,
-     * so enforcing can be re-armed afterwards. */
-    static struct rev_patch avc_rp, avc_noaudit_rp;
     avc_fn = (void *)get_addr("avc_has_perm");
     if (!avc_fn)
         pr_err("dfroot: avc_has_perm not found, skipping\n");
@@ -250,7 +248,6 @@ static int __nocfi __init dfroot_init(void)
     }
 
     // Oppo/OnePlus
-    static struct rev_patch oplus_exe_rp, oplus_root_rp;
     oplus_exe_fn = (void *)(mkln ? mkln("oplus_exe_block_ret_handler") : 0);
     if (!oplus_exe_fn)
         pr_err("dfroot: oplus_exe_block_ret_handler not found, skipping\n");
@@ -268,7 +265,6 @@ static int __nocfi __init dfroot_init(void)
     }
 
     // Samsung
-    static struct rev_patch defex_enforce_rp, defex_umh_rp;
     defex_enforce_fn = (void *)get_addr("task_defex_enforce");
     if (!defex_enforce_fn)
         pr_err("dfroot: task_defex_enforce not found, skipping\n");
