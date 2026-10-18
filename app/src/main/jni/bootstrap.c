@@ -13,6 +13,7 @@
 #define KSUD       "/data/adb/ksud"
 #define PREFS_PATH "/data/user_de/0/df.root/shared_prefs/dfroot.xml"
 #define MODULES_DIR "/data/adb/modules"
+#define SELINUX_ENFORCE "/sys/fs/selinux/enforce"
 
 static int pref_true(const char *buf, const char *key)
 {
@@ -173,6 +174,22 @@ static void touch(const char *path)
         close(fd);
 }
 
+/* Best-effort SELinux re-arm from userland. The kernel module already
+ * restores selinux_state and reverts its avc patches before returning;
+ * this is the fallback for kernels where the selinux_state knob does not
+ * exist (CONFIG_SECURITY_SELINUX_DEVELOP=n) and the ko fell back to
+ * permanent patching. Writing "1" to the enforce node is safe either way:
+ * on a healthy kernel it is a no-op (already enforcing). */
+static void restore_enforcing(void)
+{
+    int fd = open(SELINUX_ENFORCE, O_WRONLY);
+    if (fd < 0)
+        return;
+    if (write(fd, "1", 1) != 1)
+        touch("/dev/dfmw2");
+    close(fd);
+}
+
 /* Mark every installed module disabled before ksud runs. A broken module
  * otherwise loads on the next boot and bootloops the device. */
 static int disable_modules(void)
@@ -226,8 +243,13 @@ int main(void)
             while (late_load_running()) sleep(1);
             run_ctx("u:r:ksu:s0", (char *[]){ KSUD, "soft-reboot", NULL });
         }
+        /* Root handoff complete: close the permissive window. */
+        restore_enforcing();
     } else {
         touch("/dev/dfme2");
+        /* Handoff failed: still try to re-arm; leaving the device
+         * permissive after a failed run would be the worst outcome. */
+        restore_enforcing();
     }
         
     return 0;
