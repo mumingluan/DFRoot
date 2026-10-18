@@ -24,11 +24,16 @@ typedef int  (*insn_patch_t)(void *addrs[], u32 insns[], int cnt);
 
 /* vivo iQOO 15 (PD2505D, 6.12.23-android16-5): the vr.ko vendor module
  * registers a global sys_exit tracepoint callback whose handler crashes the
- * system once KernelSU registers its own hooks and the manager is opened.
- * GhostLock's device-verified profile establishes that the tracepoint's
- * funcs array pointer lives at __tracepoint_sys_exit + 72 on this kernel.
- * Zeroing it before the KSU handoff prevents the crash. */
-#define VIVO_SYS_EXIT_FUNCS_OFF  72
+ * system once KernelSU registers its own hooks — and a soft reboot fires it
+ * on every process exit, which is what hard-reset the device.
+ *
+ * The write target is the GhostLock profile value verified on-device: the
+ * funcs pointer sits at kernel-image offset 39405704 from _text. The
+ * tracepoint-relative form (__tracepoint_sys_exit + 72) is kept ONLY as a
+ * cross-check, since that "+72" was inferred from a fixed APK rather than
+ * measured. A mismatch is logged and the measured target is the one used. */
+#define VIVO_SYS_EXIT_FUNCS_IMAGE_OFF  39405704
+#define VIVO_SYS_EXIT_FUNCS_TP_OFF     72
 
 static insn_patch_t insn_patch_text;
 
@@ -82,28 +87,26 @@ static __nocfi void unpatch_fn(struct rev_patch *rp)
     rp->active = false;
 }
 
-/* Module kallsyms lookup convenience: returns 0 when the symbol is absent. */
-static unsigned long mod_sym(module_kallsyms_lookup_name_t mkln,
-                             const char *mod, const char *sym)
+/* KernelSU detection. Primary probe is the sysfs module entry: it names the
+ * module itself and does not depend on which symbols a given KSU fork
+ * chooses to expose. The plain-symbol probes are the fallback —
+ * module_kallsyms_lookup_name takes a bare symbol name (no "mod:sym"
+ * form), which a "mod:sym" string would never match. */
+static bool ksu_loaded(module_kallsyms_lookup_name_t mkln,
+                       kern_path_t kern_path_fn,
+                       path_put_t path_put_fn)
 {
-    char qualified[64];
-    if (!mkln)
-        return 0;
-    snprintf(qualified, sizeof(qualified), "%s:%s", mod, sym);
-    return mkln(qualified);
-}
+    struct path p;
 
-/* KernelSU detection: any kernelsu-module symbol visible via module kallsyms
- * means a KSU variant is already resident. Re-running the exploit on top of a
- * loaded KSU corrupts its state (double registration, torn hooks). */
-static bool ksu_loaded(module_kallsyms_lookup_name_t mkln)
-{
-    if (mod_sym(mkln, "kernelsu", "ksu_handle_execveat_ksud"))
+    if (kern_path_fn && path_put_fn &&
+        !kern_path_fn("/sys/module/kernelsu", 0, &p)) {
+        path_put_fn(&p);
         return true;
-    if (mod_sym(mkln, "kernelsu", "ksu_handle_execve_sucompat_common"))
-        return true;
-    /* KSU-Next / other forks register the same exported entry point name. */
-    if (mod_sym(mkln, "kernelsu", "ksu_handle_execveat"))
+    }
+    if (mkln && (mkln("ksu_handle_execveat_ksud") ||
+                 mkln("ksu_handle_execveat") ||
+                 mkln("ksu_handle_inode_event") ||
+                 mkln("ksu_handle_execve_sucompat_common")))
         return true;
     return false;
 }
@@ -121,7 +124,7 @@ static int vivo_disarm_sys_exit(kallsyms_lookup_name_t get_addr,
 {
     struct path p;
 #if LINUX_VERSION_CODE == KERNEL_VERSION(6, 12, 0)
-    void *tp, **funcs;
+    void *tp, *text, **funcs;
     unsigned long vaddr;
 #endif
 
@@ -139,15 +142,29 @@ static int vivo_disarm_sys_exit(kallsyms_lookup_name_t get_addr,
     pr_info("dfroot: sys_exit guard not verified for this KMI, skipping\n");
     return 0;
 #else
-    tp = (void *)get_addr("__tracepoint_sys_exit");
-    if (!tp) {
-        pr_err("dfroot: __tracepoint_sys_exit not found\n");
+    text = (void *)get_addr("_text");
+    tp   = (void *)get_addr("__tracepoint_sys_exit");
+    if (!text) {
+        pr_err("dfroot: _text not found, refusing to guess the vr target\n");
         return -EINVAL;
     }
 
-    funcs = (void **)((u8 *)tp + VIVO_SYS_EXIT_FUNCS_OFF);
+    /* Measured target (used): GhostLock's verified image offset.
+     * Inferred target (cross-check only): tracepoint-relative +72. */
+    funcs = (void **)((u8 *)text + VIVO_SYS_EXIT_FUNCS_IMAGE_OFF);
+    if (tp) {
+        void **inferred = (void **)((u8 *)tp + VIVO_SYS_EXIT_FUNCS_TP_OFF);
+        pr_info("dfroot: vr target measured=%px inferred=%px (tp=%px %s)\n",
+                funcs, inferred, tp,
+                funcs == inferred ? "match" : "MISMATCH");
+    } else {
+        pr_info("dfroot: vr target measured=%px (tracepoint symbol absent)\n",
+                funcs);
+    }
+
     if (!READ_ONCE(*funcs)) {
-        pr_info("dfroot: sys_exit funcs already empty\n");
+        pr_warn("dfroot: vr funcs slot empty at %px — layout may be wrong\n",
+                funcs);
         return 0;
     }
 
@@ -203,13 +220,6 @@ static int __nocfi __init dfroot_init(void)
 
     mkln = (module_kallsyms_lookup_name_t)get_addr("module_kallsyms_lookup_name");
 
-    // Refuse to re-run with KernelSU already resident: the second exploit
-    // pass corrupts KSU's registration state and hard-crashes the device.
-    if (ksu_loaded(mkln)) {
-        pr_err("dfroot: KernelSU already loaded, refusing re-run\n");
-        return -EEXIST;
-    }
-
     // Invalidate page_cache for crash_dump64
     // NOTE: this can cause issues if a process is currently executing
     //   crash_dump64. We may want to revert to manual restore patching
@@ -225,6 +235,15 @@ static int __nocfi __init dfroot_init(void)
         invalidate_fn(p.dentry->d_inode->i_mapping);
         path_put_fn(&p);
         pr_info("dfroot: cleared page cache for crash_dump64\n");
+    }
+
+    // Refuse to re-run with KernelSU already resident: the second exploit
+    // pass corrupts KSU's registration state and hard-crashes the device.
+    // Must run after kern_path is resolved (the sysfs probe needs it) and
+    // before any patch: nothing has been touched at this point yet.
+    if (ksu_loaded(mkln, kern_path_fn, path_put_fn)) {
+        pr_err("dfroot: KernelSU already loaded, refusing re-run\n");
+        return -EEXIST;
     }
 
     // vivo: disarm the vr.ko sys_exit tracepoint callback before anything
