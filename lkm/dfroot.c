@@ -120,8 +120,10 @@ static int vivo_disarm_sys_exit(kallsyms_lookup_name_t get_addr,
                                 path_put_t path_put_fn)
 {
     struct path p;
+#if LINUX_VERSION_CODE == KERNEL_VERSION(6, 12, 0)
     void *tp, **funcs;
     unsigned long vaddr;
+#endif
 
     if (kern_path_fn("/sys/module/vr", 0, &p)) {
         pr_info("dfroot: vr module not loaded, skipping sys_exit guard\n");
