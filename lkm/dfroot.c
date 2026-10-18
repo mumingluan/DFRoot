@@ -146,7 +146,10 @@ static int vivo_disarm_sys_exit(kallsyms_lookup_name_t get_addr,
      * build the struct tracepoint layout may differ, so skip the guard
      * instead of writing at a wrong offset. */
 #if !VIVO_612_KMI
-    pr_info("dfroot: sys_exit guard not verified for this KMI, skipping\n");
+    pr_info("dfroot: sys_exit guard not verified for this KMI(ver %d.%d.%d), skipping\n",
+            LINUX_VERSION_CODE >> 16,
+            (LINUX_VERSION_CODE >> 8) & 0xff,
+            LINUX_VERSION_CODE & 0xff);
     return 0;
 #else
     text = (void *)get_addr("_text");
